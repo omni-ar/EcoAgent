@@ -1,0 +1,37 @@
+EcoAgent Phase 2 Integration Test Results
+==================================================
+
+[PASS] Heating clamped to [18, 22] -- got 18.0
+[PASS] Cooling clamped to [23, 27] -- got 27.0
+[PASS] Deadband >= 1.0 -- gap=9.0
+[PASS] Near-violation deadband enforcement -- h=22.0, c=23.0, gap=1.0
+[PASS] Temp 20.0 -> HEATING -- got HEATING
+[PASS] Temp 26.0 -> COOLING -- got COOLING
+[PASS] Temp 23.0 -> IDLE -- got IDLE
+[PASS] Temp at 21.5 boundary -> IDLE -- got IDLE
+[PASS] Temp at 24.5 boundary -> IDLE -- got IDLE
+[PASS] Temp 21.49 -> HEATING -- got HEATING
+[PASS] Temp 24.51 -> COOLING -- got COOLING
+[PASS] Critical cold clamp fires despite dwell_timer=0 -- reason=critical_clamp_cold, h=22.0, c=27.0
+[PASS] Critical cold sets heating to max -- got 22.0
+[PASS] Critical hot clamp fires despite dwell_timer=0 -- reason=critical_clamp_hot, h=18.0, c=23.0
+[PASS] Critical hot sets cooling to min -- got 23.0
+[PASS] Normal change blocked by dwell_timer=0 -- reason=dwell_hold
+[PASS] Annual simulation return code 0 -- got 0
+[PASS] Annual simulation success
+[PASS] Total callbacks = 35040 -- got 35040
+[PASS] Final status RUNNING -- got RUNNING
+[PASS] All 5 zones not degraded -- {'SPACE1-1': False, 'SPACE2-1': False, 'SPACE3-1': False, 'SPACE4-1': False, 'SPACE5-1': False}
+[PASS] Zero warmup controller actions -- got 0
+[PASS] First callback is non-warmup
+[PASS] All writes have readback verification -- writes=175200, verified=175200
+[PASS] Non-zero actuator writes -- got 175200
+[PASS] Simulation completes with degraded zone
+[PASS] SPACE3-1 is degraded
+[PASS] Other 4 zones not degraded
+[PASS] Zero writes to degraded SPACE3-1 -- got 0
+[PASS] Other zones received writes -- got 140160
+[PASS] Simulation survives controller exception -- returncode=0
+[PASS] Exception logged in controller.jsonl
+
+Total: 32 | Passed: 32 | Failed: 0

@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from ecoagent.simulation.energyplus import EnergyPlusRunner
+from ecoagent.controller.orchestrator import Orchestrator
+
 
 def main():
     config_path = Path(__file__).resolve().parent.parent / "config" / "default.yaml"
@@ -17,56 +19,38 @@ def main():
         config = yaml.safe_load(f)
 
     runner = EnergyPlusRunner(config)
+    orchestrator = Orchestrator()
 
-    callback_state = {
-        "count": 0,
-        "temp_handle": -1,
-        "actuator_handle": -1,
-        "initialized": False
-    }
+    print("Launching EnergyPlus in-process simulation with Phase 2 controller...")
+    result = runner.run(callback_fn=orchestrator.create_callback())
+    orchestrator.finalize()
 
-    def live_control_callback(api, state):
-        callback_state["count"] += 1
-        
-        if not callback_state["initialized"]:
-            callback_state["temp_handle"] = api.exchange.get_variable_handle(state, "Zone Air Temperature", "SPACE1-1")
-            callback_state["actuator_handle"] = api.exchange.get_actuator_handle(state, "Schedule:Compact", "Schedule Value", "CLGSETP_SCH")
-            if callback_state["actuator_handle"] == -1:
-                callback_state["actuator_handle"] = api.exchange.get_actuator_handle(state, "Schedule:Constant", "Schedule Value", "CLGSETP_SCH")
-            callback_state["initialized"] = True
-
-        if callback_state["temp_handle"] != -1:
-            current_temp = api.exchange.get_variable_value(state, callback_state["temp_handle"])
-            if callback_state["count"] <= 5 or callback_state["count"] % 5000 == 0:
-                print(f"[Live Timestep Callback #{callback_state['count']}] Zone Air Temp: {current_temp:.2f} C")
-
-        if callback_state["actuator_handle"] != -1:
-            api.exchange.set_actuator_value(state, callback_state["actuator_handle"], 24.0)
-
-    print("Launching EnergyPlus in-process simulation with live runtime callbacks...")
-    result = runner.run(callback_fn=live_control_callback)
+    summary = orchestrator.get_summary()
 
     print(f"\nExecution Status Success: {result['success']}")
     print(f"Return Code: {result['returncode']}")
-    print(f"Total Live Timestep Callbacks Processed: {callback_state['count']}")
+    print(f"Total Controller Callbacks: {summary['total_callbacks']}")
+    print(f"Final Scheduler Status: {summary['final_status']}")
+    print(f"Controller Log: {summary['log_path']}")
     print(f"Output Directory: {result['output_dir']}")
+
+    for zone_name, zone_info in summary["zones"].items():
+        print(
+            f"  {zone_name}: state={zone_info['final_state']} "
+            f"h_sp={zone_info['final_heating_sp']:.1f} "
+            f"c_sp={zone_info['final_cooling_sp']:.1f} "
+            f"degraded={zone_info['degraded']} "
+            f"saturated={zone_info['saturation_flag']}"
+        )
 
     if result["errors"]:
         print("Execution Errors/Warnings Detected:")
         for err in result["errors"]:
             print(f"  - {err}")
 
-    if result["success"]:
-        data = runner.get_simulation_results()
-        if data is not None:
-            print("\nSimulation Telemetry Metrics Extracted Successfully:")
-            print(f"Zone Temperature Columns: {data['zone_temperature_columns']}")
-            print(f"HVAC Energy Columns: {data['hvac_columns']}")
-            print(f"Total Output Rows: {len(data['data'])}")
-        else:
-            print("CSV output eplusout.csv not found in output directory.")
-    else:
+    if not result["success"]:
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
