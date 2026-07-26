@@ -8,6 +8,6 @@ agent:
   model: "qwen2.5:7b"
   base_url: "http://localhost:11434/v1"
   api_key: "ollama"
-  max_tokens: 1024
+  max_tokens: 200
   temperature: 0.0
-  reasoning_interval: 16
+  reasoning_interval: 1

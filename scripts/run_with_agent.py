@@ -147,7 +147,7 @@ def main():
     print("\nSimulation complete. Shutting down agent...")
     shutdown_event.set()
     cycle_queue.put(None)  # sentinel
-    agent_thread.join(timeout=10)
+    agent_thread.join(timeout=30)
 
     if agent_thread.is_alive():
         print("WARNING: Agent thread did not exit within timeout.")
