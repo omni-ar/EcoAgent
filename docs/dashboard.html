@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EcoAgent - Quantitative Savings Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; }
+  .header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); padding: 2rem; text-align: center; border-bottom: 1px solid #334155; }
+  .header h1 { font-size: 2rem; font-weight: 700; background: linear-gradient(90deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .header p { color: #94a3b8; margin-top: 0.5rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; padding: 2rem; max-width: 1400px; margin: 0 auto; }
+  .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; }
+  .card h3 { font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.5rem; }
+  .card .value { font-size: 2.5rem; font-weight: 700; }
+  .card .sub { font-size: 0.875rem; color: #64748b; margin-top: 0.25rem; }
+  .green { color: #4ade80; }
+  .blue { color: #38bdf8; }
+  .amber { color: #fbbf24; }
+  .purple { color: #a78bfa; }
+  .full-width { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; }
+  th { color: #94a3b8; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+  .bar-container { display: flex; align-items: center; gap: 1rem; margin: 0.5rem 0; }
+  .bar { height: 24px; border-radius: 4px; transition: width 0.5s; }
+  .bar-baseline { background: linear-gradient(90deg, #475569, #64748b); }
+  .bar-agent { background: linear-gradient(90deg, #22c55e, #4ade80); }
+  .chart-section { background: #1e293b; border-radius: 12px; padding: 2rem; border: 1px solid #334155; margin: 0 2rem 2rem; max-width: 1400px; }
+  .chart-section h2 { margin-bottom: 1rem; }
+  .svg-chart { width: 100%; height: 300px; }
+  .footer { text-align: center; padding: 2rem; color: #475569; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>EcoAgent Quantitative Savings Dashboard</h1>
+  <p>Baseline vs AI-Supervised HVAC Control | Full-Year Simulation (8760 hours) | 5-Zone Commercial Building</p>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Total Energy (Baseline)</h3>
+    <div class="value blue">29,517 kWh</div>
+    <div class="sub">Chiller: 4,357 + Heating: 25,160</div>
+  </div>
+  <div class="card">
+    <h3>Total Energy (Agent)</h3>
+    <div class="value green">29,513 kWh</div>
+    <div class="sub">Chiller: 4,357 + Heating: 25,156</div>
+  </div>
+  <div class="card">
+    <h3>Net Reduction</h3>
+    <div class="value green">4.1 kWh</div>
+    <div class="sub">0.01% reduction</div>
+  </div>
+  <div class="card">
+    <h3>Agent Performance</h3>
+    <div class="value purple">3 cycles</div>
+    <div class="sub">3 proposals | 100% submission rate</div>
+  </div>
+</div>
+
+<div class="grid" style="padding-top: 0;">
+  <div class="card full-width">
+    <h3>Energy Breakdown Comparison</h3>
+    <table>
+      <tr><th>Component</th><th>Baseline (kWh)</th><th>Agent (kWh)</th><th>Savings (kWh)</th><th>Savings %</th></tr>
+      <tr>
+        <td>Chiller Electricity</td>
+        <td>4,357.0</td>
+        <td>4,357.0</td>
+        <td>0.0</td>
+        <td>0.00%</td>
+      </tr>
+      <tr>
+        <td>Heating Energy</td>
+        <td>25,159.7</td>
+        <td>25,155.6</td>
+        <td>4.1</td>
+        <td>0.02%</td>
+      </tr>
+      <tr style="font-weight: bold; border-top: 2px solid #475569;">
+        <td>Total</td>
+        <td>29,516.7</td>
+        <td>29,512.5</td>
+        <td>4.1</td>
+        <td>0.01%</td>
+      </tr>
+    </table>
+    
+    <div style="margin-top: 1.5rem;">
+      <div class="bar-container">
+        <span style="width: 80px;">Baseline</span>
+        <div class="bar bar-baseline" style="width: 100%;"></div>
+        <span>29,517</span>
+      </div>
+      <div class="bar-container">
+        <span style="width: 80px;">Agent</span>
+        <div class="bar bar-agent" style="width: 99.98600069650664%;"></div>
+        <span>29,513</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid" style="padding-top: 0;">
+  <div class="card full-width">
+    <h3>Agent Proposals</h3>
+    <table>
+      <tr><th>#</th><th>Callback</th><th>Zone</th><th>Heating (C)</th><th>Cooling (C)</th></tr>
+      <tr><td>1</td><td>7405</td><td>SPACE2-1</td><td>22</td><td>25</td></tr><tr><td>2</td><td>17884</td><td>SPACE2-1</td><td>18</td><td>22.5</td></tr><tr><td>3</td><td>28717</td><td>SPACE2-1</td><td>22.5</td><td>23.5</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="grid" style="padding-top: 0;">
+  <div class="card full-width">
+    <h3>Reasoning Cycle Performance</h3>
+    <table>
+      <tr><th>Cycle</th><th>Callback</th><th>Latency (s)</th><th>Turns</th><th>Prompt Tokens</th><th>Completion Tokens</th><th>Proposal</th></tr>
+      <tr><td>0</td><td>7405</td><td>12.0</td><td>2</td><td>3627</td><td>71</td><td>Yes</td></tr><tr><td>1</td><td>17884</td><td>12.2</td><td>2</td><td>3844</td><td>71</td><td>Yes</td></tr><tr><td>2</td><td>28717</td><td>11.8</td><td>2</td><td>3689</td><td>70</td><td>Yes</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="footer">
+  <p>Generated by EcoAgent | 2026-07-26 19:28 | Qwen 2.5 7B via Ollama | EnergyPlus 26.1</p>
+</div>
+</body>
+</html>

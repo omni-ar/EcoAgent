@@ -94,6 +94,18 @@ class AgentLoop:
         """
         logger.info("AgentLoop started. reasoning_interval=%d", self._reasoning_interval)
 
+        # ── Warm the model so first real cycle isn't penalized ────
+        try:
+            client = self._get_client()
+            client.chat.completions.create(
+                model=self._config.get("model", "qwen2.5:7b"),
+                messages=[{"role": "user", "content": "ready"}],
+                max_tokens=1, timeout=30,
+            )
+            logger.info("Model warmed up successfully.")
+        except Exception as e:
+            logger.warning("Model warmup failed (non-fatal): %s", e)
+
         try:
             while not self._shutdown.is_set():
                 try:
@@ -149,26 +161,40 @@ class AgentLoop:
             self._run_reasoning(snapshot)
 
     def _run_reasoning(self, snapshot):
-        """Execute one LLM reasoning step: context → LLM → tools → policy update."""
+        """Execute a multi-turn LLM reasoning cycle: context → LLM → tools → LLM → ... → policy update.
+
+        Implements a ReAct loop that feeds tool results back to the LLM so it
+        can observe (e.g. get_building_summary) and then act (propose_setpoint)
+        within a single reasoning cycle.
+
+        Termination conditions (whichever comes first):
+          1. Assistant returns no tool calls (finish_reason != "tool_calls")
+          2. propose_setpoint executed successfully
+          3. max_turns reached (configurable, default 4)
+        """
         wall_start = time.time()
         reasoning_ts = datetime.now(timezone.utc).isoformat()
         callback_number = snapshot.callback_number if hasattr(snapshot, "callback_number") else None
 
+        max_turns = self._config.get("max_turns", 4)
+
         error = None
-        llm_response_content = None
-        tool_calls_raw = []
-        tool_results = []
-        finish_reason = None
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
+        all_tool_calls_raw = []   # Accumulated across all turns
+        all_tool_results = []     # Accumulated across all turns
+        turns = []                # Per-turn records for trace
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_total_tokens = 0
+        final_finish_reason = None
+        final_content = None
+        proposal_executed = False
 
         try:
             # Build context
             context = self._context_builder.build()
             user_message = prompts.build_user_message(context)
 
-            # Build messages
+            # Build messages (grows across turns)
             messages = [
                 {"role": "system", "content": prompts.SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
@@ -177,63 +203,121 @@ class AgentLoop:
             # Build tool definitions for function calling
             openai_tools = self._build_openai_tools()
 
-            # LLM call with timeout and retry (Patch 2)
-            response = None
-            for attempt in range(2):
-                try:
-                    client = self._get_client()
-                    kwargs = {
-                        "model": self._config.get("model", "qwen2.5:7b"),
-                        "messages": messages,
-                        "temperature": self._config.get("temperature", 0.0),
-                        "max_tokens": self._config.get("max_tokens", 1024),
-                        "timeout": 30,
-                    }
-                    if openai_tools:
-                        kwargs["tools"] = openai_tools
-                    response = client.chat.completions.create(**kwargs)
-                    break
-                except Exception as e:
-                    if attempt == 0:
-                        logger.warning("LLM attempt 1 failed: %s. Retrying in 2s.", e)
-                        time.sleep(2)
-                        continue
-                    error = f"llm_timeout: {e}"
-                    logger.error("LLM attempt 2 failed: %s", e)
+            for turn in range(max_turns):
+                # ── LLM call with timeout and retry ──────────────
+                response = None
+                for attempt in range(2):
+                    try:
+                        client = self._get_client()
+                        kwargs = {
+                            "model": self._config.get("model", "qwen2.5:7b"),
+                            "messages": messages,
+                            "temperature": self._config.get("temperature", 0.0),
+                            "max_tokens": self._config.get("max_tokens", 200),
+                            "timeout": 30,
+                        }
+                        if openai_tools:
+                            kwargs["tools"] = openai_tools
+                        response = client.chat.completions.create(**kwargs)
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            logger.warning("LLM attempt 1 failed: %s. Retrying in 2s.", e)
+                            time.sleep(2)
+                            continue
+                        error = f"llm_timeout: {e}"
+                        logger.error("LLM attempt 2 failed: %s", e)
 
-            if response is not None and response.choices:
+                # If LLM failed completely, break out of the turn loop
+                if response is None or not response.choices:
+                    break
+
                 choice = response.choices[0]
                 msg = choice.message
-                llm_response_content = msg.content or ""
+                content = msg.content or ""
                 finish_reason = choice.finish_reason
+                final_finish_reason = finish_reason
+                final_content = content
 
-                # Token usage
+                # Token usage accumulation
                 if response.usage:
-                    prompt_tokens = response.usage.prompt_tokens or 0
-                    completion_tokens = response.usage.completion_tokens or 0
-                    total_tokens = response.usage.total_tokens or 0
+                    total_prompt_tokens += response.usage.prompt_tokens or 0
+                    total_completion_tokens += response.usage.completion_tokens or 0
+                    total_total_tokens += response.usage.total_tokens or 0
 
-                # Process tool calls
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        fn = tc.function
-                        try:
-                            args = json.loads(fn.arguments) if isinstance(fn.arguments, str) else fn.arguments
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
+                # ── No tool calls → terminal turn ────────────────
+                if not msg.tool_calls:
+                    turns.append({
+                        "turn": turn,
+                        "content": content[:500],
+                        "tool_calls": [],
+                        "tool_results": [],
+                    })
+                    break
 
-                        tool_calls_raw.append({
+                # ── Process tool calls for this turn ─────────────
+                turn_tool_calls = []
+                turn_tool_results = []
+
+                # Append the assistant message (with tool_calls) to messages
+                # so the LLM sees its own prior output on the next turn.
+                assistant_msg = {"role": "assistant", "content": content}
+                # Build tool_calls list for the message
+                tc_list = []
+                for tc in msg.tool_calls:
+                    fn = tc.function
+                    tc_list.append({
+                        "id": tc.id if hasattr(tc, "id") and tc.id else f"call_{turn}_{fn.name}",
+                        "type": "function",
+                        "function": {
                             "name": fn.name,
-                            "arguments": args,
-                        })
+                            "arguments": fn.arguments if isinstance(fn.arguments, str) else json.dumps(fn.arguments),
+                        },
+                    })
+                assistant_msg["tool_calls"] = tc_list
+                messages.append(assistant_msg)
 
-                        # Execute via MCP dispatcher (hybrid) or direct adapter
-                        result = self._execute_tool(fn.name, args)
-                        tool_results.append({
-                            "tool": fn.name,
-                            "args": args,
-                            "result": result,
-                        })
+                for tc in msg.tool_calls:
+                    fn = tc.function
+                    tc_id = tc.id if hasattr(tc, "id") and tc.id else f"call_{turn}_{fn.name}"
+                    try:
+                        args = json.loads(fn.arguments) if isinstance(fn.arguments, str) else fn.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+
+                    call_record = {"name": fn.name, "arguments": args}
+                    turn_tool_calls.append(call_record)
+                    all_tool_calls_raw.append(call_record)
+
+                    # Execute via MCP dispatcher (hybrid) or direct adapter
+                    result = self._execute_tool(fn.name, args)
+                    result_record = {"tool": fn.name, "args": args, "result": result}
+                    turn_tool_results.append(result_record)
+                    all_tool_results.append(result_record)
+
+                    # Append tool result as a message for the next LLM call
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": json.dumps(result, default=str),
+                    })
+
+                    # Check if propose_setpoint succeeded
+                    if (fn.name == "propose_setpoint"
+                            and isinstance(result, dict)
+                            and result.get("status") == "pending"):
+                        proposal_executed = True
+
+                turns.append({
+                    "turn": turn,
+                    "content": content[:500],
+                    "tool_calls": turn_tool_calls,
+                    "tool_results": turn_tool_results,
+                })
+
+                # ── Early exit if proposal was submitted ─────────
+                if proposal_executed:
+                    break
 
         except Exception as e:
             error = str(e)
@@ -242,7 +326,7 @@ class AgentLoop:
         # ── Policy update (Patch 1: mutation-safe) ───────────────
         old_policy = dict(self.current_policy)
         new_policy = {}
-        for tr in tool_results:
+        for tr in all_tool_results:
             if (tr["tool"] == "propose_setpoint"
                     and isinstance(tr["result"], dict)
                     and tr["result"].get("status") == "pending"):
@@ -253,7 +337,7 @@ class AgentLoop:
                     new_policy[zone] = (float(h), float(c))
 
         # Only update policy if LLM actually made tool calls
-        if tool_calls_raw:
+        if all_tool_calls_raw:
             self.current_policy = new_policy
             self._policy_version += 1
 
@@ -262,7 +346,7 @@ class AgentLoop:
 
         # ── Build released zones (Patch 3: provenance) ───────────
         released_zones = {}
-        if tool_calls_raw:
+        if all_tool_calls_raw:
             for zone in old_policy:
                 if zone not in new_policy:
                     released_zones[zone] = {
@@ -298,19 +382,21 @@ class AgentLoop:
             "llm_request": {
                 "model": self._config.get("model", "qwen2.5:7b"),
                 "temperature": self._config.get("temperature", 0.0),
-                "message_count": 2,
+                "message_count": len(messages),
             },
             "llm_response": {
-                "content": (llm_response_content or "")[:500],
-                "tool_calls": tool_calls_raw,
-                "finish_reason": finish_reason,
+                "content": (final_content or "")[:500],
+                "tool_calls": all_tool_calls_raw,
+                "finish_reason": final_finish_reason,
             },
-            "tool_results": tool_results,
-            "proposal_submitted": any(
+            "tool_results": all_tool_results,
+            "turns": turns,
+            "turn_count": len(turns),
+            "proposal_submitted": proposal_executed or any(
                 tr["tool"] == "propose_setpoint" and
                 isinstance(tr["result"], dict) and
                 tr["result"].get("status") == "pending"
-                for tr in tool_results
+                for tr in all_tool_results
             ),
             "policy_state": {
                 "policy_version": self._policy_version,
@@ -318,9 +404,9 @@ class AgentLoop:
                 "released_zones": released_zones,
             },
             "metrics": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_total_tokens,
                 "latency_seconds": round(wall_elapsed, 3),
             },
             "error": error,

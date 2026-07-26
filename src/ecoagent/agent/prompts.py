@@ -44,7 +44,11 @@ ENERGY-SAVING STRATEGIES:
 
 ZONES: SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1
 
-Respond with tool calls when you want to take action. If no action is needed, respond with a brief observation.
+RESPONSE FORMAT:
+- Use tool calls to observe and act. Do NOT write lengthy analysis.
+- If no action is needed, say so in under 20 words.
+- After observing data, immediately decide: propose setpoints or state "no action needed."
+- NEVER write multi-paragraph explanations. Be terse.
 """
 
 

@@ -1,148 +1,164 @@
-# Architecture Specification
+# EcoAgent — System Architecture Document
 
-## Overview
+## 1. Problem Statement
 
-EcoAgent is structured around an in-process simulation loop leveraging the PyEnergyPlus C-API (`pyenergyplus.api.EnergyPlusAPI`). Rather than running EnergyPlus as an external subprocess with post-hoc CSV analysis, EcoAgent registers Python callbacks that execute inside the EnergyPlus C runtime loop at 15-minute simulated intervals.
+Buildings consume approximately 40% of global energy, with HVAC systems as the primary consumer. Traditional Building Management Systems (BMS) use rigid, rule-based schedules that cannot adapt dynamically to real-time conditions. EcoAgent transforms a passive energy consumer into an active, self-correcting agent using AI-driven closed-loop control.
 
-The architecture comprises two primary layers:
-1. **Deterministic Control Layer (Phase 2 Baseline)**: Scheduler, sensor reading, deterministic state machines, safety guard validation, actuator writing, and readback verification.
-2. **Supervisory Infrastructure Layer (Phase 3 Baseline)**: Advisory proposal tracking, runtime snapshotting, bounded history buffering, synchronous event emission, analytics computation, and internal tool registry.
+## 2. Solution Overview
 
----
+EcoAgent pairs **EnergyPlus** (a physics-based building energy simulator) with a locally-hosted **open-source LLM** (Qwen 2.5 7B via Ollama) using the **Model Context Protocol (MCP)** to create an autonomous supervisory control system. The LLM observes real-time building telemetry, reasons about energy optimization opportunities, and injects setpoint adjustments back into the running simulation — all without human intervention.
 
-## System Architecture Diagram
+## 3. Architecture
 
-```mermaid
-flowchart TD
-    EP[EnergyPlus C Runtime Engine] -->|fires callback every 15 min| CB[callback_begin_system_timestep_before_predictor]
-    CB --> SCH[Shared Scheduler tick & clear_expired]
-    SCH -->|Status: INITIALIZING| INIT[Resolve Handles Once]
-    INIT -->|All Handles Valid| RUN[Status: RUNNING]
-    INIT -->|Init Timeout Exceeded| DIS[Status: DISABLED]
-    RUN --> SENS[Read Physical Sensors]
-    SENS --> SUP_CHECK{Pending Supervisor Proposal?}
-    
-    SUP_CHECK -->|Yes| PROP_SUP[Use Supervisor Setpoints & State: SUPERVISOR]
-    SUP_CHECK -->|No| ZC[Zone Controller evaluate & State: IDLE/HEATING/COOLING]
-    
-    PROP_SUP --> SG[Safety Guard validate_command]
-    ZC --> SG
-    
-    SG -->|Validated Commands| ACT[Actuator Write & Readback Verification]
-    ACT -->|Write Result| SNAP[Create RuntimeSnapshot]
-    SNAP --> HB[Push to HistoryBuffer 96-size deque]
-    SNAP --> EB[Emit CycleCompleted & Outcome Events on EventBus]
-    EB --> AN[Analytics Layer]
-    LOG[ControllerLogger JSON-L] <-- Write log --> EP
-    
-    TR[ToolRegistry] -.->|Queries| HB
-    TR -.->|Queries| SNAP
-    TR -.->|Proposes| SUP_CHECK
-    MCP[Future MCP Tools Server] -.-> TR
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     EnergyPlus Simulation                       │
+│   5 Zones: SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1   │
+│   Timestep callbacks every 15 simulated minutes (4x/hour)      │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  Runtime Callback
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                Controller Layer (Deterministic)                 │
+│  ZoneController (FSM) → Safety Guard → Actuator (EMS R/W)      │
+│  - Comfort triggers: <21.5°C heating, >24.5°C cooling          │
+│  - Hard bounds: H[18,22] C[23,27], deadband ≥1°C               │
+│  - Dwell timer prevents oscillation                             │
+│  - Readback verification on every write                         │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  RuntimeSnapshot → Queue
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 Supervisor Layer (Advisory)                      │
+│  RuntimeSnapshot → HistoryBuffer (96 slots) → Analytics         │
+│  SupervisorInterface: proposal lifecycle, TTL, 3-way outcome    │
+│  EventBus: pub/sub for snapshot distribution                    │
+│  ToolRegistry: 6 data tools + 1 action tool                    │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  MCP Tool Schemas
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    MCP + Agent Layer                             │
+│  McpAdapter: 8 tools with JSON schemas for function calling     │
+│  McpToolDispatcher: validation, type coercion, routing          │
+│  AgentLoop: ReAct pattern (Observe → Reason → Act)              │
+│  ContextBuilder: structured state → user message                │
+│  AgentTraceLogger: JSONL audit trail per cycle                  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  OpenAI-compatible API
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│           LLM: Qwen 2.5 7B (Ollama, localhost:11434)            │
+│  - Local inference, zero cloud dependency                       │
+│  - Function calling with tool schemas                           │
+│  - Concise response format (max 200 tokens)                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
----
+## 4. MCP Tool-Calling Design
 
-## Callback Execution Lifecycle
+The LLM interacts with the simulation through 8 MCP tools exposed as OpenAI function-calling schemas:
 
-The primary integration point is `callback_begin_system_timestep_before_predictor`. This callback fires at the start of each system timestep, after zone temperature heat balance calculations are complete but **before** EnergyPlus computes zone load predictions and dispatches HVAC equipment controllers.
+| Tool | Purpose | Returns |
+|---|---|---|
+| `get_building_summary` | Full building state in one call | All zones, outdoor temp, chiller power, comfort % |
+| `get_runtime_state` | All zone temperatures and setpoints | Per-zone temps, setpoints, controller states |
+| `get_zone` | Single zone detail | Temperature, setpoints, FSM state, safety status |
+| `get_zone_trend` | Temperature trend over time | Historical temp/setpoint arrays |
+| `get_scheduler_status` | Simulation clock and status | Month, day, hour, sim status |
+| `get_history` | Historical snapshots | Array of past RuntimeSnapshots |
+| `get_analytics_summary` | Comfort %, energy metrics | Comfort score, chiller stats |
+| `propose_setpoint` | Submit heating/cooling change | Proposal status (pending/rejected) |
 
-### Complete Lifecycle Sequence Diagram
+The `McpToolDispatcher` validates arguments against JSON schemas, coerces types (e.g., string→float for setpoints), and routes calls through `McpAdapter` to `ToolRegistry`. All tool results are JSON-serializable and returned to the LLM as `role: "tool"` messages.
 
-```mermaid
-sequenceDiagram
-    participant EP as EnergyPlus Engine
-    participant CB as Runtime Callback
-    participant SCH as Scheduler
-    participant SI as SupervisorInterface
-    participant SENS as Sensor Interface
-    participant ZC as Zone Controller
-    participant SG as Safety Guard
-    participant ACT as Actuator Interface
-    participant HB as HistoryBuffer
-    participant EB as EventBus
-    participant LOG as ControllerLogger
+## 5. Closed-Loop Execution Framework
 
-    EP->>CB: Fire begin_system_timestep_before_predictor(state)
-    CB->>SCH: tick(api, state)
-    CB->>SI: clear_expired(current_callback)
-    
-    alt is Warmup or DISABLED
-        SCH-->>CB: Return False
-        CB-->>EP: Return control to EnergyPlus
-    else is RUNNING
-        SCH-->>CB: Return True
-        CB->>SENS: read_sensors(api, state)
-        SENS-->>CB: SensorReading (Zone Temps, Outdoor Temp)
-        
-        loop For Each Thermal Zone (1..5)
-            CB->>SI: get_pending_proposal(zone_name)
-            alt Supervisor Proposal Active
-                SI-->>CB: SetpointProposal (Heating SP, Cooling SP)
-                Note over CB: Skip ZC.evaluate() - aggressive_mode NOT mutated
-            else No Proposal Active
-                SI-->>CB: None
-                CB->>ZC: evaluate(zone_state)
-                ZC-->>CB: ProposedCommand (Heating SP, Cooling SP)
-            end
-            
-            CB->>SG: validate_command(zone_state, proposed_h, proposed_c)
-            SG-->>CB: ValidatedCommand (Approved SPs, Reason)
-            
-            alt if Approved and Not Degraded
-                CB->>ACT: write_and_verify(api, state, zone, SPs)
-                ACT->>EP: set_actuator_value(heating_sp)
-                ACT->>EP: set_actuator_value(cooling_sp)
-                ACT->>EP: get_actuator_value(heating_handle)
-                ACT->>EP: get_actuator_value(cooling_handle)
-                ACT-->>CB: WriteResult (Success, Readback SPs)
-                
-                alt Proposal Was Evaluated
-                    alt Setpoints Match Proposed (READBACK_TOLERANCE)
-                        CB->>EB: emit(SupervisorProposalAccepted)
-                    else Setpoints Modified by Safety Rules
-                        CB->>EB: emit(SupervisorProposalModified)
-                    end
-                    CB->>SI: consume_proposal(zone_name)
-                end
-            else if Rejected or Degraded
-                alt Proposal Was Evaluated
-                    CB->>EB: emit(SupervisorProposalRejected)
-                    CB->>SI: consume_proposal(zone_name)
-                end
-            end
-        end
-        
-        CB->>HB: append(create_snapshot())
-        CB->>EB: emit(CycleCompleted(snapshot))
-        CB->>LOG: log_cycle(scheduler, zone_states, sensor_reading)
-        CB-->>EP: Return control to EnergyPlus
-    end
+### 5.1 Data Flow
+
+1. **Feedback (EnergyPlus → AI)**: The simulation streams continuous performance metrics via timestep callbacks (4x per simulated hour). Each callback produces a `RuntimeSnapshot` containing zone temperatures, setpoints, controller states, outdoor temperature, and chiller power.
+
+2. **Reasoning (AI)**: The `AgentLoop` implements a **ReAct (Reason + Act) pattern**:
+   - **Turn 0 (Observe)**: LLM calls `get_building_summary` to read current building state
+   - **Turn 1 (Act)**: With tool results in context, LLM decides whether to call `propose_setpoint`
+   - The multi-turn loop feeds tool results back as conversation messages, enabling observe-then-act within one reasoning cycle
+
+3. **Control Actions (AI → EnergyPlus)**: Setpoint proposals pass through Safety Guard validation before reaching actuators
+
+4. **Forward Injection**: Validated setpoints are written to EnergyPlus via EMS actuator handles with readback verification
+
+### 5.2 Threading Model
+
+```
+Thread 1 (EnergyPlus runtime):
+  Orchestrator._execute_cycle → ZoneController → SafetyGuard → Actuator
+
+Thread 2 (Agent worker):
+  AgentLoop.run → model warmup → drain queue → drift check → LLM ReAct loop
+  
+Bridge: EventBus publishes RuntimeSnapshot → Queue → AgentLoop wakeup
 ```
 
----
+### 5.3 Drift Gating
 
-## EnergyPlus C-API Integration
+When the agent establishes a policy (e.g., "SPACE2-1 should have cooling=25°C"), it monitors for **drift** — the deterministic controller may override the LLM's setpoints. If drift exceeds 0.5°C, the agent re-submits its policy to maintain consistency. This closes the loop: the LLM doesn't just propose once and forget.
 
-The C-API interface is managed by `ecoagent.simulation.EnergyPlusRunner`. 
+## 6. Prompt Engineering Strategy
 
-### Key C-API Interaction Rules
+| Technique | Purpose | Impact |
+|---|---|---|
+| Conciseness directive | "If no action needed, say so in under 20 words" | Reduced Turn 1 from 56.8s to 3.3s |
+| max_tokens cap (200) | Prevent verbose analysis generation | Cut completion tokens from 395 to ~17-71 |
+| Explicit tool strategy | "OBSERVE first, then ANALYZE, then ACT" | Model follows ReAct pattern reliably |
+| Safety bounds in prompt | Heating [18,22], Cooling [23,27] | Model proposes within valid ranges |
+| Zone names listed | SPACE1-1 through SPACE5-1 | Eliminates hallucinated zone names |
 
-1. **State Isolation**: Simulation state is managed via `api.state_manager.new_state()` and deleted with `delete_state(state)` upon completion.
-2. **Data Availability Gate**: Handles are queried only after `api.exchange.api_data_fully_ready(state)` returns `True`.
-3. **In-Process Memory Access**: Setpoint writes (`set_actuator_value`) update EnergyPlus internal setpoint arrays immediately within C memory space.
+## 7. Latency Management
 
----
+| Component | Measured Latency | Optimization |
+|---|---|---|
+| Model cold start | ~22s | Warmup call at agent startup |
+| Turn 0 (observe, warm) | ~2.5s | Efficient prompt, minimal context |
+| Turn 1 (decide, warm) | ~3-10s | max_tokens=200, brevity prompt |
+| Full warm cycle | ~12s | Down from 59s pre-optimization |
+| Tool execution | <1ms | In-memory function call |
+| Context construction | <1ms | Pre-built snapshot |
+| Reasoning cadence | Every 8th callback | Balances observability vs inference cost |
+| Cycles per simulation | 3 (measured) | Up from 0 pre-optimization |
 
-## Pipeline Structural Boundaries
+## 8. Safety Invariants
 
-The control pipeline enforces strict structural authority boundaries:
+No LLM output bypasses the Safety Guard. These invariants hold regardless of agent behavior:
 
-1. **Sensors** read physical environment data.
-2. **Supervisor Pre-Check** checks for pending advisory proposals. If present, deterministic evaluation is skipped for that zone to prevent phantom state mutations.
-3. **Zone Controllers** evaluate zone temperatures against the comfort band [21.5, 24.5]°C if no supervisor proposal exists.
-4. **Safety Guard** validates all proposed commands against hard numerical bounds, deadbands, dwell timers, and critical boundary clamps.
-5. **Actuator Layer** issues C-API writes and performs immediate readback verification.
-6. **Telemetry & Event Layer** creates `RuntimeSnapshot`, updates `HistoryBuffer`, emits events to `EventBus`, and appends JSON-lines telemetry.
+1. **Bounds clamping**: All setpoints clamped to [18,22]°C heating and [23,27]°C cooling
+2. **Deadband enforcement**: cooling - heating ≥ 1.0°C always
+3. **Dwell timer**: Prevents setpoint changes within cooldown window
+4. **Critical override**: Emergency bounds for extreme temperatures bypass dwell
+5. **Readback verification**: Every actuator write verified by re-reading EMS handle
+6. **Zone degradation isolation**: Failed actuator handles → zone excluded from writes
 
-No external component can bypass the Safety Guard to write directly to actuators.
+## 9. Production Results
+
+| Metric | Value |
+|---|---|
+| Simulation | Full year (8760 hours), 5-zone commercial building |
+| Reasoning cycles completed | 3 |
+| Proposals submitted | 3 (100% submission rate) |
+| Proposals accepted by Safety Guard | All pending (validated) |
+| Example proposal | SPACE2-1: cooling 24→25°C (energy saving) |
+| Trace entries generated | 3 |
+| Policy versions | 3 |
+| Agent thread shutdown | Clean (no timeout) |
+
+## 10. Technology Stack
+
+| Component | Technology |
+|---|---|
+| Simulation Engine | EnergyPlus 26.1 (C-API via pyenergyplus) |
+| LLM | Qwen 2.5 7B (via Ollama, local inference) |
+| LLM API | OpenAI-compatible (localhost:11434/v1) |
+| Protocol | MCP (Model Context Protocol) |
+| Language | Python 3.11 |
+| Key Libraries | openai, pyyaml, pyenergyplus |
+| Logging | JSONL (trace.jsonl, controller.jsonl) |
+| Version Control | Git + GitHub |
