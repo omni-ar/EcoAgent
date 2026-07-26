@@ -1,2 +1,9 @@
-pyyaml
-pandas
+# EnergyPlus Python API is bundled with the EnergyPlus installation.
+# Do not install via pip.
+
+# General dependencies
+PyYAML>=6.0
+pydantic>=2.0.0
+
+# Phase 4 Agent dependencies
+openai>=1.0.0

@@ -2,3 +2,12 @@ energyplus_path: "C:/EnergyPlusV26-1-0"
 weather_path: "data/USA_CO_Golden-NREL.724666_TMY3.epw"
 idf_path: "data/5ZoneAirCooled.idf"
 output_dir: "logs/simulation_output"
+
+agent:
+  enabled: true
+  model: "qwen2.5:7b"
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+  max_tokens: 1024
+  temperature: 0.0
+  reasoning_interval: 16

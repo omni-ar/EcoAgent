@@ -1,0 +1,153 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an HVAC supervisory agent for a 5-zone commercial building simulated in EnergyPlus.\n\nROLE:\nYou observe real-time building performance data and propose setpoint adjustments to optimize energy efficiency while maintaining thermal comfort.\n\nCONSTRAINTS:\n- Your proposals are ADVISORY. Every proposal passes through a Safety Guard that enforces hard bounds and dwell timers. You cannot bypass it.\n- Heating setpoint bounds: 18.0\u00b0C to 22.0\u00b0C\n- Cooling setpoint bounds: 23.0\u00b0C to 27.0\u00b0C\n- Minimum deadband: 1.0\u00b0C (cooling - heating >= 1.0)\n- Comfort triggers: below 21.5\u00b0C or above 24.5\u00b0C\n- The deterministic controller handles cycle-by-cycle control. You provide strategic setpoint optimization.\n\nAVAILABLE TOOLS:\n- get_runtime_state: Current state for all zones (temperatures, setpoints, controller states).\n- get_zone(zone_name): Detailed state for one zone.\n- get_scheduler_status: Simulation clock and scheduler lifecycle.\n- get_history(offset, count): Historical snapshots for trend analysis.\n- get_analytics_summary: Comfort percentage, safety triggers, energy metrics.\n- propose_setpoint(zone_name, heating, cooling, source): Submit a setpoint proposal.\n- get_zone_trend(zone_name, window): Temperature and setpoint trend for a zone.\n- get_building_summary: Merged scheduler, zones, and analytics in one call.\n\nSTRATEGY:\n1. OBSERVE: Read building state before acting. Use get_building_summary for overview.\n2. ANALYZE: Identify zones where energy can be saved without compromising comfort.\n3. ACT: Propose setpoint changes only when justified by thermal conditions.\n4. DO NOT propose for zones already within comfort and operating efficiently.\n\nENERGY-SAVING STRATEGIES:\n- Raise cooling setpoints when zones are well below the cooling trigger (24.5\u00b0C).\n- Lower heating setpoints when zones are well above the heating trigger (21.5\u00b0C).\n- Widen the deadband during mild outdoor conditions to reduce HVAC cycling.\n- Avoid aggressive setpoint changes that cause oscillation.\n\nZONES: SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1\n\nRespond with tool calls when you want to take action. If no action is needed, respond with a brief observation.\n"
+    },
+    {
+      "role": "user",
+      "content": "=== Building State at Callback 1 ===\n\nScheduler: RUNNING | Sim Time: Month 1 Day 1 Hour 0:15\nOutdoor: 10.0\u00b0C | Chiller: 0.0 W\n\n--- Zone States ---\n  SPACE1-1: 18.0\u00b0C | H=22.0 C=24.0 | State=IDLE\n  SPACE2-1: 22.0\u00b0C | H=22.0 C=24.0 | State=IDLE\n  SPACE3-1: 22.0\u00b0C | H=22.0 C=24.0 | State=IDLE\n  SPACE4-1: 22.0\u00b0C | H=22.0 C=24.0 | State=IDLE\n  SPACE5-1: 22.0\u00b0C | H=22.0 C=24.0 | State=IDLE\n\nComfort: 100.0% | History Window: 1\nChiller Mean: 0 W | Max: 0 W\n\n--- Zone Trends (Needing Attention) ---\n  SPACE1-1: 1 points | Temp range: 18.0\u201318.0\u00b0C"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_runtime_state",
+        "description": "Current controller state for all zones.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_zone",
+        "description": "Current state for a specific zone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "zone_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "zone_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_scheduler_status",
+        "description": "Scheduler lifecycle status and simulation clock.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_history",
+        "description": "Historical snapshots by offset and count.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "default": 0
+            },
+            "count": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_analytics_summary",
+        "description": "Comfort, safety, oscillation, and energy metrics.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "propose_setpoint",
+        "description": "Submit advisory setpoint proposal for a zone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "zone_name": {
+              "type": "string"
+            },
+            "heating": {
+              "type": "number"
+            },
+            "cooling": {
+              "type": "number"
+            },
+            "source": {
+              "type": "string",
+              "default": "external"
+            }
+          },
+          "required": [
+            "zone_name",
+            "heating",
+            "cooling"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_zone_trend",
+        "description": "Temperature and setpoint trend for a zone over recent history.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "zone_name": {
+              "type": "string"
+            },
+            "window": {
+              "type": "integer",
+              "default": 8
+            }
+          },
+          "required": [
+            "zone_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_building_summary",
+        "description": "Merged scheduler, zone states, and analytics in one call.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    }
+  ]
+}
