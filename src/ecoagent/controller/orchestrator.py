@@ -4,6 +4,7 @@ from ecoagent.controller.constants import (
     COOLING_BOUND_MIN, COOLING_BOUND_MAX,
     SATURATION_CYCLE_THRESHOLD,
     COMFORT_TRIGGER_LOW, COMFORT_TRIGGER_HIGH,
+    READBACK_TOLERANCE,
 )
 from ecoagent.controller.scheduler import Scheduler
 from ecoagent.controller.zone_state import create_zone_states
@@ -11,15 +12,26 @@ from ecoagent.controller.zone_controller import ZoneController, create_zone_cont
 from ecoagent.controller.safety_guard import validate_command
 from ecoagent.controller.actuator import ActuatorManager
 from ecoagent.controller.logger import ControllerLogger
+from ecoagent.supervisor.runtime_snapshot import create_snapshot
+from ecoagent.supervisor.history_buffer import HistoryBuffer
+from ecoagent.supervisor.events import (
+    EventBus, CycleCompleted,
+    SupervisorProposalAccepted, SupervisorProposalModified,
+    SupervisorProposalRejected,
+)
+from ecoagent.supervisor.constants import STATE_SUPERVISOR
 
 
 class Orchestrator:
-    def __init__(self, log_dir="logs/controller_output"):
+    def __init__(self, log_dir="logs/controller_output", supervisor=None, history_size=96):
         self.scheduler = Scheduler()
         self.zone_states = create_zone_states()
         self.zone_controllers = create_zone_controllers()
         self.actuator_manager = ActuatorManager()
         self.logger = ControllerLogger(output_dir=log_dir)
+        self.supervisor = supervisor
+        self.history_buffer = HistoryBuffer(max_size=history_size)
+        self.event_bus = EventBus()
 
     def create_callback(self):
         def callback(api, state):
@@ -31,6 +43,9 @@ class Orchestrator:
 
     def _execute_cycle(self, api, state):
         should_run = self.scheduler.tick(api, state)
+
+        if self.supervisor:
+            self.supervisor.clear_expired(self.scheduler.callback_counter)
 
         if not should_run:
             if self.scheduler.timeout_triggered:
@@ -76,15 +91,25 @@ class Orchestrator:
             zs = self.zone_states[zone_name]
             zc = self.zone_controllers[zone_name]
 
-            proposed = zc.evaluate(zs)
-            zs.controller_state = proposed.state
-            zs.previous_decision = proposed.decision_reason
+            proposal = self.supervisor.get_pending_proposal(zone_name) if self.supervisor else None
 
-            validated = validate_command(zs, proposed.heating_setpoint, proposed.cooling_setpoint)
+            if proposal is not None:
+                proposed_heating = proposal.heating_setpoint
+                proposed_cooling = proposal.cooling_setpoint
+                zs.controller_state = STATE_SUPERVISOR
+                zs.previous_decision = f"supervisor_proposal_{proposal.source}"
+            else:
+                proposed = zc.evaluate(zs)
+                proposed_heating = proposed.heating_setpoint
+                proposed_cooling = proposed.cooling_setpoint
+                zs.controller_state = proposed.state
+                zs.previous_decision = proposed.decision_reason
+
+            validated = validate_command(zs, proposed_heating, proposed_cooling)
 
             result = {
-                "proposed_heating": proposed.heating_setpoint,
-                "proposed_cooling": proposed.cooling_setpoint,
+                "proposed_heating": proposed_heating,
+                "proposed_cooling": proposed_cooling,
                 "validated_heating": validated.heating_setpoint,
                 "validated_cooling": validated.cooling_setpoint,
                 "safety_reason": validated.reason,
@@ -126,11 +151,26 @@ class Orchestrator:
                     zs.current_heating_setpoint = validated.heating_setpoint
                     zs.current_cooling_setpoint = validated.cooling_setpoint
                     zs.previous_actuator_command = (validated.heating_setpoint, validated.cooling_setpoint)
+
+                    if proposal is not None:
+                        self._emit_supervisor_outcome(proposal, validated, zs)
                 else:
                     zs.record_readback_failure()
                     zs.dwell_timer += 1
+
+                    if proposal is not None:
+                        self.event_bus.emit(SupervisorProposalRejected(
+                            zone_name, "readback_failure", self.scheduler.callback_counter,
+                        ))
+                        self.supervisor.consume_proposal(zone_name)
             else:
                 zs.dwell_timer += 1
+
+                if proposal is not None:
+                    self.event_bus.emit(SupervisorProposalRejected(
+                        zone_name, validated.reason, self.scheduler.callback_counter,
+                    ))
+                    self.supervisor.consume_proposal(zone_name)
 
             self._update_saturation(zs, validated)
 
@@ -143,7 +183,35 @@ class Orchestrator:
                 str(sensor_reading.anomalies),
             )
 
+        snapshot = create_snapshot(self.scheduler, self.zone_states, sensor_reading, zone_results)
+        self.history_buffer.append(snapshot)
+        self.event_bus.emit(CycleCompleted(snapshot))
+
         self.logger.log_cycle(self.scheduler, self.zone_states, sensor_reading, zone_results)
+
+    def _emit_supervisor_outcome(self, proposal, validated, zs):
+        h_match = abs(validated.heating_setpoint - proposal.heating_setpoint) < READBACK_TOLERANCE
+        c_match = abs(validated.cooling_setpoint - proposal.cooling_setpoint) < READBACK_TOLERANCE
+
+        if h_match and c_match:
+            self.event_bus.emit(SupervisorProposalAccepted(
+                zs.zone_name,
+                validated.heating_setpoint,
+                validated.cooling_setpoint,
+                self.scheduler.callback_counter,
+            ))
+        else:
+            self.event_bus.emit(SupervisorProposalModified(
+                zs.zone_name,
+                proposal.heating_setpoint,
+                proposal.cooling_setpoint,
+                validated.heating_setpoint,
+                validated.cooling_setpoint,
+                validated.reason,
+                self.scheduler.callback_counter,
+            ))
+
+        self.supervisor.consume_proposal(zs.zone_name)
 
     def _update_saturation(self, zs, validated):
         at_heating_bound = abs(validated.heating_setpoint - HEATING_BOUND_MAX) < 0.001

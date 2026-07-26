@@ -2,7 +2,9 @@
 
 ## Overview
 
-The EcoAgent Phase 2 controller is a rule-based, multi-zone deterministic setpoint optimization package. It contains five independent zone controller instances coordinated by a shared runtime scheduler and validated by an immutable Safety Guard layer.
+The EcoAgent deterministic controller is a rule-based, multi-zone setpoint optimization package. It contains five independent zone controller instances coordinated by a shared runtime scheduler and validated by an immutable Safety Guard layer.
+
+During Phase 3, this deterministic controller was integrated with the supervisory infrastructure layer. A pre-evaluate check in `Orchestrator._execute_cycle` checks for active advisory proposals from `SupervisorInterface` before calling `ZoneController.evaluate()`, ensuring that supervisor operation never mutates deterministic controller state (`aggressive_mode`).
 
 ---
 
@@ -12,11 +14,11 @@ The EcoAgent Phase 2 controller is a rule-based, multi-zone deterministic setpoi
 | :--- | :--- | :--- |
 | **Scheduler** | `ecoagent.controller.scheduler.Scheduler` | Tracks callback counter, simulation clock, warmup status, and initialization state machine. Filters warmup callbacks. |
 | **Zone State** | `ecoagent.controller.zone_state.ZoneState` | Maintains independent mutable state for a single zone (temperatures, current setpoints, dwell timers, saturation flags, degraded status). |
-| **Zone Controller** | `ecoagent.controller.zone_controller.ZoneController` | Evaluates zone temperature against comfort boundaries. Computes magnitude-scaled setpoint step changes with hysteresis. |
+| **Zone Controller** | `ecoagent.controller.zone_controller.ZoneController` | Evaluates zone temperature against comfort boundaries when no supervisor proposal is active. Computes magnitude-scaled setpoint step changes with hysteresis. |
 | **Safety Guard** | `ecoagent.controller.safety_guard.validate_command` | Pure function enforcing hard safety bounds, minimum deadband, dwell timers, and critical temperature clamps. |
 | **Actuator Manager** | `ecoagent.controller.actuator.ActuatorManager` | Caches C-API handles, reads physical sensors, writes actuator values, and executes immediate readback verification. |
 | **Logger** | `ecoagent.controller.logger.ControllerLogger` | Writes structured JSON-lines records per callback cycle. |
-| **Orchestrator** | `ecoagent.controller.orchestrator.Orchestrator` | Top-level callback generator wiring all components in pipeline order inside a defensive try-except block. |
+| **Orchestrator** | `ecoagent.controller.orchestrator.Orchestrator` | Top-level callback generator wiring all control and supervisory components in pipeline order inside a defensive try-except block. |
 
 ---
 
